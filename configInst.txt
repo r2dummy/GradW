@@ -1,0 +1,56 @@
+//Install JAVA 8:
+sudo apt update
+sudo apt install openjdk-8-jdk -y
+
+//Jenkins : 
+wget -q -O - https://pkg.jenkins.io/debian/jenkins.io.key | sudo apt-key add -
+
+sudo sh -c 'echo deb http://pkg.jenkins.io/debian-stable binary/ > /etc/apt/sources.list.d/jenkins.list'
+
+sudo apt update
+sudo apt install jenkins -y
+systemctl status jenkins
+
+sudo ufw allow 8080
+sudo ufw status
+
+//Maven :
+sudo apt update
+sudo apt install maven -y
+mvn -version
+
+//Docker :
+sudo apt-get update
+sudo apt-get install \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg-agent \
+    software-properties-common
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo apt-key fingerprint 0EBFCD88
+sudo add-apt-repository \
+   "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
+   $(lsb_release -cs) \
+   stable"
+sudo apt-get update
+sudo apt-get install docker-ce docker-ce-cli containerd.io
+sudo docker --version 
+Права:  sudo groupadd docker
+        sudo gpasswd -a ${USER} docker
+        sudo service docker restart
+
+//Artifactory : 
+docker pull docker.bintray.io/jfrog/artifactory-oss:latest
+sudo mkdir -p /jfrog/artifactory
+sudo chown -R 1030 /jfrog/
+docker run --name artifactory -d -p 8081:8081 \
+   -v /jfrog/artifactory:/var/opt/jfrog/artifactory \
+   docker.bintray.io/jfrog/artifactory-oss:latest
+
+
+//Ansible :
+sudo apt-get update
+sudo apt-add-repository ppa:ansible/ansible
+sudo apt-get update
+sudo apt-get install ansible -y
