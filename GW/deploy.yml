@@ -1,0 +1,30 @@
+---
+- hosts: "{{ ENV | default('CI') }}"
+  become: true
+  tasks:
+
+    - name: install java
+      apt:
+       name: openjdk-8-jdk
+
+    - name: dependencies install lxml
+      apt:
+       name: python-lxml
+       state: present
+
+    - name: get artifact from Artifacorty
+      get_url:
+          dest: /tmp
+          url: http://milook:miklmiklmikl@18.207.221.194:8081/artifactory/libs-snapshot-local/org/springframework/boot/spring-boot-smoke-test-web-ui/2.2.0.BUILD-SNAPSHOT/spring-boot-smoke-test-web-ui-{{BUILD_NUMBER}}.jar
+          # username: milook
+          # password: miklmiklmikl
+          mode: 0755
+          group: ubuntu
+          owner: ubuntu
+
+    - name: run java app
+      become: true
+      shell: java -jar /tmp/spring-boot-smoke-test-web-ui-{{ BUILD_NUMBER }}.jar --server.port={{ PORT_NUMBER | default('8080') }}
+      async: 360
+      poll: 0
+...
