@@ -1,0 +1,183 @@
+pipeline {
+    agent any
+    parameters {
+        choice(name: 'ENVIRONMENTS', choices: ['dev', 'qa', 'prod'], description: 'Environment where the application will be deployed')
+    }
+    options {
+      gitLabConnection('ssh://git@git.epam.com:epm-rdua/epmrduadhp.git')
+    }
+    triggers {
+        gitlab(triggerOnPush: true, triggerOnMergeRequest: true, branchFilterType: 'NameBasedFilter', includeBranchesSpec: '*/develop', secretToken: "a4cfb46d73ee1b8cc1871aa217fca08b")
+    }
+    environment {
+        FRONTEND_DIR = ""
+        FRONTEND_PORT = ""
+        BACKEND_PORT = ""
+        GIT_BRANCH = ""
+        JOLOKIA_PORT = ""
+        DHP_ENV = "${params.ENVIRONMENTS}"
+        DATABASE_DH = ""
+        MYSQL_CREDENTIALS = ""
+        BACKEND_URL = ""
+    }
+    stages {
+        stage('Clone frontend repo') {
+            steps {
+                script {
+                    if (DHP_ENV == 'dev'){
+                        FRONTEND_DIR = '/opt/DogHotel/dev'
+                        FRONTEND_PORT = ':6001'
+                        BACKEND_PORT = '5000'
+                        JOLOKIA_PORT = '7777'
+                        GIT_BRANCH = 'develop'
+                        DATABASE_DH = 'doghotel_dev'
+                        MYSQL_CREDENTIALS = 'mariadb_dev'
+                        BACKEND_URL = 'http://doghotel.epm-rdua.projects.epam.com'
+                    } 
+                    if (DHP_ENV == 'qa'){
+                        FRONTEND_DIR = '/opt/DogHotel/qa'
+                        FRONTEND_PORT = ':7001'
+                        BACKEND_PORT = '6002'
+                        JOLOKIA_PORT = '6003'
+                        GIT_BRANCH = 'devops'
+                        DATABASE_DH = 'doghotel_qa'
+                        MYSQL_CREDENTIALS = 'mariadb_qa'
+                        BACKEND_URL = 'http://doghotel.epm-rdua.projects.epam.com'
+                    } 
+                    if (DHP_ENV == 'prod'){
+                        FRONTEND_DIR = '/opt/DogHotel/app'
+                        FRONTEND_PORT = ''
+                        BACKEND_PORT = '5505'
+                        JOLOKIA_PORT = '6004'
+                        GIT_BRANCH = 'develop'
+                        DATABASE_DH = 'doghotel'
+                        MYSQL_CREDENTIALS = 'DogHotel-backend-DB-user'
+                        BACKEND_URL = 'http://doghotel.epm-rdua.projects.epam.com'
+                    } 
+                } 
+                cleanWs()
+                git branch: "${GIT_BRANCH}", 
+                credentialsId: "jenkins-provision-key", 
+                url: 'ssh://git@git.epam.com/epm-rdua/epmrduadhp.git'
+            }
+        }
+        stage('build frontend') {
+            steps { 
+                sh """
+                  [ -e package-lock.json ] && rm package-lock.json
+                  npm install
+                  env REACT_APP_URL="${BACKEND_URL}:${BACKEND_PORT}" npm run build
+                """
+            }
+        }
+        stage ('create backup FE') {
+            steps {
+                sh """
+                  mkdir -p /tmp/doghotel/backup
+                  tar -czf /tmp/doghotel/backup/frontend_${DHP_ENV}_${BUILD_NUMBER}.tar.gz ${FRONTEND_DIR}
+                """
+            }
+        }
+        stage ('deploy frontend') {
+            steps {
+                sh """
+                  rm -rf ${FRONTEND_DIR}/*
+                  cp -r ./build/* ${FRONTEND_DIR}/
+                """
+                retry(10) {
+                     sh("curl http://doghotel.epm-rdua.projects.epam.com${FRONTEND_PORT}/ -I --fail")
+                }
+            }
+			post {
+				failure('Restore from backup FE') {
+					sh """
+					rm -rf ${FRONTEND_DIR}/*
+					tar xf /tmp/doghotel/backup/frontend_${DHP_ENV}_${BUILD_NUMBER}.tar.gz -C ${FRONTEND_DIR}/
+					"""
+				}
+				success {
+					echo "Frontend successfully deployed"
+				}
+			}
+        }
+
+        stage('build backend') {
+            steps {
+                withMaven(maven: 'Apache Maven 3.6.0') {
+                    withCredentials([usernamePassword(credentialsId: "${MYSQL_CREDENTIALS}", usernameVariable: 'USER', passwordVariable: 'PASSWORD')]) {
+                        sh """
+                            mvn -Dflyway.user=$USER -Dflyway.url=jdbc:mariadb://localhost:3306/${DATABASE_DH} -Dflyway.password=$PASSWORD  flyway:migrate
+                            mvn -Dflyway.user=$USER -Dflyway.url=jdbc:mariadb://localhost:3306/${DATABASE_DH} -Dflyway.password=$PASSWORD clean install 
+                        """
+                    }
+                }
+            }
+			post {
+				failure('Fail') {
+					echo "Fail build BE"
+            }
+			    success {
+				    archiveArtifacts artifacts: 'target/*.jar', onlyIfSuccessful: true
+					echo "Successfully builded BE"
+                }
+            }
+		}
+        stage('deploy backend') {
+            steps {
+                sh "sudo rm -rf /home/SuperAdmin/docker/backend/*SNAPSHOT.jar && sudo cp ${WORKSPACE}/target/*.jar /home/SuperAdmin/docker/backend/"
+                sh "sudo docker build -t backend_${DHP_ENV}:$BUILD_NUMBER /home/SuperAdmin/docker/backend/"
+				sh """ #!/bin/bash
+                  if sudo docker ps --all | grep backend_${DHP_ENV}; then 
+                    sudo docker container ls --all | grep backend_${DHP_ENV} | awk '{print \$2}' > backend_${DHP_ENV}_backup
+                    sudo docker rm --force backend_${DHP_ENV} || true
+                  fi
+                """
+                withCredentials([usernamePassword(credentialsId: "${MYSQL_CREDENTIALS}", usernameVariable: 'USER', passwordVariable: 'PASSWORD')]) {
+                    sh """ #!/bin/bash
+                      sudo docker run -d -p ${BACKEND_PORT}:5505 -p ${JOLOKIA_PORT}:7777 --add-host=mysql_server:`hostname -I  | awk '{print \$1}'` --name backend_${DHP_ENV} backend_${DHP_ENV}:$BUILD_NUMBER \
+                      /usr/bin/java -javaagent:/opt/jolokia.jar=port=7777,host=0.0.0.0 -Xms256m -Xmx512m -jar /opt/DogHotel/backend/epmrduadhp-1.0-SNAPSHOT.jar \
+                      --spring.datasource.url="jdbc:mariadb://mysql_server:3306/${DATABASE_DH}" \
+                      --spring.datasource.username="${USER}" \
+                      --spring.datasource.password="${PASSWORD}" \
+                      --cors.allowedOrigins="${BACKEND_URL}${FRONTEND_PORT}"
+                    """   
+                }
+                 sh "sleep 20"
+				 retry(2) {
+				 	sh("curl http://localhost:${BACKEND_PORT}/doghotel-api/health -I --fail")
+                 }
+            }
+			post {
+				failure('Fail') {
+                    withCredentials([usernamePassword(credentialsId: "${MYSQL_CREDENTIALS}", usernameVariable: 'USER', passwordVariable: 'PASSWORD')]) {
+                        sh """ #!/bin/bash
+                          sudo docker rm --force backend_${DHP_ENV} || true
+                          IMAGE=\$(cat backend_${DHP_ENV}_backup)
+                          sudo docker run -d -p ${BACKEND_PORT}:5505 -p ${JOLOKIA_PORT}:7777 --add-host=mysql_server:`hostname -I  | awk '{print \$1}'` --name backend_${DHP_ENV} \$IMAGE \
+                          /usr/bin/java -Xms256m -Xmx512m -jar /opt/DogHotel/backend/epmrduadhp-1.0-SNAPSHOT.jar \
+                          --spring.datasource.url="jdbc:mariadb://mysql_server:3306/${DATABASE_DH}" \
+                          --spring.datasource.username="${USER}" \
+                          --spring.datasource.password="${PASSWORD}" \
+                          --cors.allowedOrigins="${BACKEND_URL}${FRONTEND_PORT}"
+                        """   
+                    }
+					echo "Fail deployed BE"
+                }
+				success {
+					echo "Successfully deployed BE"
+                }
+            }
+        }
+    }
+    post {
+        failure('Fail') {
+            echo "Fail"
+        }
+        success {
+//            archiveArtifacts artifacts: 'target/*.jar', onlyIfSuccessful: true
+            echo "Successfully deployed"
+            echo "FRONTEND_PORT${FRONTEND_PORT}"
+            echo "BACKEND_PORT: ${BACKEND_PORT}"
+        }
+    }
+}
